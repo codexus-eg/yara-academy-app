@@ -1,0 +1,70 @@
+# Codemagic: builds the iPhone app on a cloud Mac.
+workflows:
+  ios-check:
+    name: iOS check (no signing)
+    instance_type: mac_mini_m2
+    max_build_duration: 40
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Packages
+        script: flutter pub get
+      - name: Build (unsigned, only checks it compiles)
+        script: flutter build ios --release --no-codesign --dart-define=API_BASE=https://yaraacademy.tech
+    artifacts:
+      - build/ios/iphoneos/Runner.app
+
+  ios-release:
+    name: iOS release (TestFlight)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    integrations:
+      app_store_connect: yara-asc        # name of the App Store Connect API key added in Codemagic
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.yara.yaraAcademy
+    scripts:
+      - name: Packages
+        script: flutter pub get
+      - name: Signing
+        script: xcode-project use-profiles
+      - name: Build IPA
+        script: flutter build ipa --release --export-options-plist=/Users/builder/export_options.plist --dart-define=API_BASE=https://yaraacademy.tech
+    artifacts:
+      - build/ios/ipa/*.ipa
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+
+  ios-simulator:
+    name: iOS simulator (try by VNC)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Packages
+        script: flutter pub get
+      - name: Build for simulator
+        script: flutter build ios --simulator --debug --dart-define=API_BASE=https://yaraacademy.tech
+      - name: Boot iPhone and launch app
+        script: |
+          UDID=$(xcrun simctl list devices available | grep -E "iPhone [0-9]+ Pro Max" | tail -1 | grep -oE '[0-9A-F-]{36}')
+          [ -z "$UDID" ] && UDID=$(xcrun simctl list devices available | grep -m1 "iPhone" | grep -oE '[0-9A-F-]{36}')
+          echo "Simulator: $UDID"
+          xcrun simctl boot "$UDID" || true
+          open -a Simulator
+          sleep 15
+          xcrun simctl install "$UDID" build/ios/iphonesimulator/Runner.app
+          xcrun simctl launch "$UDID" com.yara.yaraAcademy
+      - name: Keep machine alive for 45 minutes
+        script: sleep 2700

@@ -1,0 +1,515 @@
+import 'dart:async';
+
+import 'package:dio/dio.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:socket_io_client/socket_io_client.dart' as io;
+import 'package:url_launcher/url_launcher.dart';
+
+import '../core/api.dart';
+import '../core/auth.dart';
+import '../core/config.dart';
+import '../core/models.dart';
+import '../core/sheet.dart';
+import '../core/theme.dart';
+import '../core/widgets.dart';
+import 'home.dart' show openSupportWith;
+import 'session_widgets.dart';
+
+class ChatScreen extends StatefulWidget {
+  const ChatScreen({super.key, required this.courseId, required this.title});
+  final String courseId, title;
+  @override
+  State<ChatScreen> createState() => _ChatScreenState();
+}
+
+class _ChatScreenState extends State<ChatScreen> {
+  final _msgs = <Message>[];
+  final _input = TextEditingController();
+  final _zoom = TextEditingController();
+  final _scroll = ScrollController();
+  final _zoomFocus = FocusNode();
+  io.Socket? _sock;
+  Timer? _tick;
+  Course? _course;
+  List<Map<String, dynamic>> _appts = [];
+  String? _notice, _error;
+  bool _loading = true, _sending = false;
+
+  Api get _api => context.read<Api>();
+  String get _role => context.read<AuthState>().role;
+  bool get _staff => _role != 'STUDENT';
+  bool get _isSup => _role == 'SUPERVISOR';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    _connect();
+    _tick = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    _sock?.dispose();
+    _input.dispose();
+    _zoom.dispose();
+    _zoomFocus.dispose();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final id = widget.courseId;
+    try {
+      final m = await _api.get('/courses/$id/messages', query: {'limit': 100});
+      final items = ((m['items'] as List?) ?? []).map((e) => Message(e as Map<String, dynamic>)).toList();
+      items.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      if (!mounted) return;
+      setState(() {
+        _msgs..clear()..addAll(items);
+        _notice = m['notice'] as String?;
+        _error = null;
+      });
+    } on ApiError catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    }
+    await _loadCourse();
+    await _loadAppts();
+    if (mounted) setState(() => _loading = false);
+    _toBottom();
+  }
+
+  Future<void> _loadCourse() async {
+    try {
+      final r = await _api.get('/courses/${widget.courseId}');
+      if (mounted) setState(() => _course = Course(Map<String, dynamic>.from(r['course'] as Map)));
+    } on ApiError catch (_) {}
+  }
+
+  Future<void> _loadAppts() async {
+    try {
+      final r = await _api.get('/courses/${widget.courseId}/appointments');
+      if (mounted) setState(() => _appts = ((r['items'] as List?) ?? []).cast<Map<String, dynamic>>());
+    } on ApiError catch (_) {}
+  }
+
+  void _connect() {
+    final s = io.io(Config.baseUrl, io.OptionBuilder().setTransports(['websocket']).setAuth({'token': _api.token}).disableAutoConnect().build());
+    s.onConnect((_) => s.emitWithAck('join', {'courseId': widget.courseId}, ack: (_) {}));
+    s.on('message', (d) {
+      if (d is! Map) return;
+      final m = Message(Map<String, dynamic>.from(d));
+      if ((d['courseId'] ?? widget.courseId) != widget.courseId || _msgs.any((x) => x.id == m.id)) return;
+      if (mounted) setState(() => _msgs.add(m));
+      _toBottom();
+    });
+    s.on('message:deleted', (d) {
+      final id = d is Map ? d['id'] : d;
+      if (mounted) setState(() => _msgs.replaceRange(0, _msgs.length, _msgs.map((m) => m.id == id ? Message({...m.json, 'deleted': true, 'text': null, 'fileUrl': null, 'fileName': null}) : m).toList()));
+    });
+    s.on('chat:closed', (d) {
+      if (!mounted || _isSup) return;
+      toast(context, 'أغلقت الإدارة المحادثة');
+      Navigator.maybePop(context);
+    });
+    s.on('appointments:changed', (_) => _loadAppts());
+    s.on('appointment:cancelled', (_) => _loadAppts());
+    s.on('session:confirmed', (_) => _loadCourse());
+    s.connect();
+    _sock = s;
+  }
+
+  void _toBottom() => WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scroll.hasClients) _scroll.animateTo(_scroll.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+      });
+
+  void _addMsg(dynamic r) {
+    final raw = r is Map && r['message'] is Map ? r['message'] : r;
+    if (raw is! Map) return;
+    final m = Message(Map<String, dynamic>.from(raw));
+    if (!_msgs.any((x) => x.id == m.id)) setState(() => _msgs.add(m));
+    _toBottom();
+  }
+
+  Future<void> _run(Future<void> Function() f) async {
+    setState(() => _sending = true);
+    try {
+      await f();
+    } on ApiError catch (e) {
+      if (mounted) toast(context, e.message, error: true);
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  Future<void> _sendText() async {
+    final text = _input.text.trim();
+    if (text.isEmpty) return;
+    await _run(() async {
+      final r = await _api.post('/courses/${widget.courseId}/messages', body: {'text': text});
+      _input.clear();
+      _addMsg(r);
+    });
+  }
+
+  Future<void> _sendZoom() async {
+    final u = _zoom.text.trim();
+    if (u.isEmpty) return;
+    await _run(() async {
+      final r = await _api.post('/courses/${widget.courseId}/zoom', body: {'url': u});
+      _zoom.clear();
+      if (r is Map && r['message'] != null) _addMsg(r);
+      await _loadCourse();
+    });
+  }
+
+  Future<void> _attach() async {
+    final pick = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: ['jpg', 'jpeg', 'png', 'webp', 'pdf']);
+    if (pick.isEmpty) return;
+    final f = pick.first;
+    final bytes = await f.xFile.readAsBytes();
+    await _run(() async {
+      final r = await _api.request('POST', '/files', form: FormData.fromMap({'file': MultipartFile.fromBytes(bytes, filename: f.name)}));
+      final m = await _api.post('/courses/${widget.courseId}/messages', body: {'fileUrl': r['url'], 'fileName': r['name']});
+      _addMsg(m);
+    });
+  }
+
+  Future<void> _delete(Message m) async {
+    await _run(() async {
+      await _api.delete('/courses/${widget.courseId}/messages/${m.id}');
+    });
+  }
+
+  /// Reports a message to the academy: confirms, then opens a WhatsApp chat with support with the details filled in.
+  Future<void> _report(Message m) async {
+    if (!await askConfirm(context, 'الإبلاغ عن هذه الرسالة؟', ok: 'إبلاغ', body: 'هنفتح لك واتساب برسالة جاهزة للإدارة، وهي تراجع الرسالة.')) return;
+    final text = (m.text ?? '').trim();
+    final snippet = text.length > 150 ? '${text.substring(0, 150)}...' : text;
+    final msg = [
+      'إبلاغ عن رسالة غير لائقة',
+      'الكورس: ${widget.title}',
+      'المرسل: ${m.senderName ?? ''}',
+      'الوقت: ${fdt(m.createdAt)}',
+      'نص الرسالة: ${snippet.isEmpty ? '(ملف أو صورة)' : snippet}',
+    ].join('\n');
+    await openSupportWith(msg);
+  }
+
+  Future<void> _mute(String userId) async {
+    await _run(() async {
+      await _api.post('/courses/${widget.courseId}/mutes', body: {'userId': userId});
+      if (mounted) toast(context, 'تم الكتم (يقدر يقرأ فقط)');
+    });
+  }
+
+  Future<void> _newAppt() async {
+    final now = DateTime.now();
+    final date = await showDatePicker(context: context, initialDate: now.add(const Duration(days: 1)), firstDate: now, lastDate: now.add(const Duration(days: 365)));
+    if (date == null || !mounted) return;
+    final time = await showTimePicker(context: context, initialTime: const TimeOfDay(hour: 17, minute: 0), helpText: 'الوقت (بتوقيت الأكاديمية)');
+    if (time == null || !mounted) return;
+    final note = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('تحديد موعد'),
+        content: TextField(controller: note, maxLength: 120, decoration: const InputDecoration(hintText: 'ملاحظة (اختياري) مثال: حصة مراجعة')),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('رجوع')),
+          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('نشر الموعد')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    String two(int n) => n.toString().padLeft(2, '0');
+    await _run(() async {
+      final r = await _api.post('/courses/${widget.courseId}/appointments', body: {
+        'date': '${date.year}-${two(date.month)}-${two(date.day)}',
+        'time': '${two(time.hour)}:${two(time.minute)}',
+        if (note.text.trim().isNotEmpty) 'note': note.text.trim(),
+      });
+      _addMsg(r);
+      await _loadAppts();
+    });
+  }
+
+  Future<void> _cancelAppt(String id) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('إلغاء هذا الموعد؟'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('رجوع')),
+          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('إلغاء الموعد')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await _run(() async {
+      await _api.delete('/courses/${widget.courseId}/appointments/$id');
+      await _loadAppts();
+    });
+  }
+
+  Future<void> _confirm(bool held) async {
+    if (await confirmSession(context, widget.courseId, held)) {
+      await _load();
+    }
+  }
+
+  // ---- Zoom 40-minute warning (same logic as the website) ----
+  Widget? _zoomBar() {
+    final links = <Message>[];
+    for (var i = _msgs.length - 1; i >= 0; i--) {
+      if (_msgs[i].kind == 'SYSTEM') break;
+      if (_msgs[i].kind == 'ZOOM_LINK' && !_msgs[i].deleted) links.insert(0, _msgs[i]);
+    }
+    if (links.isEmpty) return null;
+    final now = DateTime.now();
+    final start = links.first.createdAt, last = links.last.createdAt;
+    final left = start.add(const Duration(minutes: sessionMin)).difference(now).inSeconds;
+    final leftMin = (left / 60).ceil();
+    final zleft = (last.add(const Duration(minutes: zoomMin)).difference(now).inSeconds / 60).ceil();
+    if (leftMin <= 0 || zleft > zoomWarn || !start.add(const Duration(minutes: sessionMin)).isAfter(last.add(const Duration(minutes: zoomMin)))) return null;
+    final hot = zleft <= 0;
+    final title = hot ? '🔄 انتهى اجتماع Zoom وتبقّى $leftMin ${leftMin <= 10 ? (leftMin == 1 ? 'دقيقة' : 'دقائق') : 'دقيقة'} من الحصة' : '⏳ ينتهي اجتماع Zoom بعد $zleft ${zleft == 1 ? 'دقيقة' : 'دقائق'}';
+    final sub = _staff
+        ? (hot ? 'أنشئي اجتماعاً جديداً وأرسلي رابطه ليدخل الطلاب.' : 'أنشئي اجتماعاً جديداً وأرسلي رابطه الآن لتكمل الحصة بلا انقطاع.')
+        : (hot ? 'انتظر رابطاً جديداً من المعلم في هذه المحادثة.' : 'ستصلك رسالة برابط جديد من المعلم لإكمال الحصة.');
+    return _banner(
+      bg: hot ? Ya.dangerBg : Ya.warnBg,
+      fg: hot ? Ya.danger : Ya.warn,
+      title: title,
+      sub: sub,
+      action: _staff
+          ? SizedBox(width: 130, child: GradButton(label: 'رابط جديد', icon: Icons.add_link_rounded, height: 40, onPressed: () {
+              _zoomFocus.requestFocus();
+              toast(context, 'الصقي رابط الاجتماع الجديد ثم اضغط إرسال');
+            }))
+          : null,
+    );
+  }
+
+  Widget _banner({required Color bg, required Color fg, required String title, String? sub, Widget? action}) => Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(16)),
+        child: Row(children: [
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title, style: TextStyle(color: fg, fontWeight: FontWeight.w700, fontSize: 14)),
+            if (sub != null) Padding(padding: const EdgeInsets.only(top: 3), child: Text(sub, style: const TextStyle(color: Ya.muted, fontSize: 12.5, height: 1.5))),
+          ])),
+          if (action != null) ...[const SizedBox(width: 10), action],
+        ]),
+      );
+
+  Widget _apptBar() {
+    final me = context.read<AuthState>().id;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(color: Ya.soft, borderRadius: BorderRadius.circular(16)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        const Text('🕒 المواعيد القادمة', style: TextStyle(fontWeight: FontWeight.w700, color: Ya.strong)),
+        for (final a in _appts.take(4))
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Row(children: [
+              Expanded(child: Text('${fappt(DateTime.parse('${a['startsAt']}'))}${(a['note'] ?? '').toString().isNotEmpty ? ' · ${a['note']}' : ''}', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14))),
+              if (_staff && (_isSup || (a['createdBy'] as Map?)?['id'] == me))
+                TextButton(onPressed: () => _cancelAppt(a['id'] as String), child: const Text('إلغاء', style: TextStyle(color: Ya.danger))),
+            ]),
+          ),
+        if (_appts.length > 4) Padding(padding: const EdgeInsets.only(top: 4), child: Text('و${_appts.length - 4} مواعيد أخرى', style: const TextStyle(color: Ya.muted, fontSize: 12.5))),
+      ]),
+    );
+  }
+
+  Widget _composer() {
+    final bar = BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(26), boxShadow: [BoxShadow(color: const Color(0xFF1F5A73).withValues(alpha: .12), blurRadius: 18, offset: const Offset(0, 6))]);
+    Widget circle(IconData i, VoidCallback? f, {bool grad = false}) => GestureDetector(
+          onTap: f,
+          child: Container(
+            width: 44, height: 44,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: grad ? null : Ya.soft, gradient: grad ? Ya.btnGradient : null, boxShadow: grad ? [BoxShadow(color: Ya.teal.withValues(alpha: .28), blurRadius: 12, offset: const Offset(0, 6))] : null),
+            child: Icon(i, color: grad ? Colors.white : Ya.strong, size: 20),
+          ),
+        );
+    final attach = circle(Icons.attach_file_rounded, _sending ? null : _attach);
+    final apptBtn = SizedBox(
+      width: 150,
+      child: OutlinedButton.icon(onPressed: _newAppt, icon: const Icon(Icons.schedule_rounded, size: 18), label: const Text('تحديد موعد')),
+    );
+    Widget zoomRow(String hint) => Row(children: [
+          Expanded(child: TextField(controller: _zoom, focusNode: _zoomFocus, textDirection: TextDirection.ltr, keyboardType: TextInputType.url, decoration: InputDecoration(hintText: hint, filled: false, border: InputBorder.none, enabledBorder: InputBorder.none, focusedBorder: InputBorder.none))),
+          circle(Icons.add_link_rounded, _sending ? null : _sendZoom, grad: true),
+        ]);
+    Widget textRow() => Row(children: [
+          attach,
+          const SizedBox(width: 6),
+          Expanded(child: TextField(controller: _input, minLines: 1, maxLines: 4, decoration: const InputDecoration(hintText: 'اكتب رسالة…', filled: false, border: InputBorder.none, enabledBorder: InputBorder.none, focusedBorder: InputBorder.none))),
+          circle(Icons.send_rounded, _sending ? null : _sendText, grad: true),
+        ]);
+    final Widget content;
+    if (_role == 'TEACHER' || _isSup) {
+      content = Column(mainAxisSize: MainAxisSize.min, children: [
+        textRow(),
+        zoomRow('رابط Zoom (اختياري)'),
+        Padding(padding: const EdgeInsets.only(bottom: 4), child: apptBtn),
+      ]);
+    } else {
+      content = textRow();
+    }
+    return SafeArea(
+      top: false,
+      child: Container(margin: const EdgeInsets.fromLTRB(12, 0, 12, 12), padding: const EdgeInsets.all(6), decoration: bar, child: content),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final me = context.read<AuthState>().id;
+    final c = _course;
+    final zb = _zoomBar();
+    final header = <Widget>[
+      if (_error != null) _banner(bg: Ya.warnBg, fg: Ya.warn, title: _error!),
+      if (_appts.isNotEmpty) _apptBar(),
+      if (c != null && _staff && c.pendingConfirmation)
+        ConfirmBox(course: c, onConfirm: _confirm, onAttendance: () => showAttendanceSheet(context, widget.courseId)),
+      if (zb != null) Padding(padding: const EdgeInsets.only(top: 10), child: zb),
+      if (c?.chatClosed == true) _banner(bg: Ya.warnBg, fg: Ya.warn, title: 'المحادثة مغلقة من الإدارة${_isSup ? ' (تظهر لك للمتابعة)' : ''}'),
+      if (_notice != null) Padding(padding: const EdgeInsets.only(bottom: 8), child: Text(_notice!, textAlign: TextAlign.center, style: const TextStyle(color: Ya.muted, fontSize: 13))),
+    ];
+    return YaPage(
+      title: widget.title,
+      back: true,
+      bottom: _error != null ? null : _composer(),
+      child: _loading
+          ? const Center(child: CircularProgressIndicator(color: Ya.teal))
+          : ListView(
+              controller: _scroll,
+              padding: const EdgeInsets.all(16),
+              children: [
+                ...header,
+                if (_msgs.isEmpty && _error == null) const EmptyState(title: 'ابدأ المحادثة', hint: 'اكتب رسالة لمعلمك، ورابط الحصة هيظهر هنا.'),
+                for (final m in _msgs)
+                  _Bubble(m, mine: m.senderId == me, api: _api, sup: _isSup, onDelete: () => _delete(m), onMute: (id) => _mute(id), onReport: () => _report(m)),
+              ],
+            ),
+    );
+  }
+}
+
+class _Bubble extends StatelessWidget {
+  const _Bubble(this.m, {required this.mine, required this.api, required this.sup, required this.onDelete, required this.onMute, required this.onReport});
+  final Message m;
+  final bool mine, sup;
+  final Api api;
+  final VoidCallback onDelete;
+  final void Function(String userId) onMute;
+  final VoidCallback onReport;
+
+  @override
+  Widget build(BuildContext context) {
+    if (m.kind == 'SYSTEM') {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Center(child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+          decoration: BoxDecoration(color: Ya.bg, borderRadius: BorderRadius.circular(999)),
+          child: Text(m.text ?? '', textAlign: TextAlign.center, style: const TextStyle(fontSize: 12.5, color: Ya.muted, height: 1.6)),
+        )),
+      );
+    }
+    final isLink = m.kind == 'ZOOM_LINK';
+    final isAppt = m.kind == 'APPOINTMENT';
+    final isImg = m.kind == 'IMAGE' && m.fileUrl != null;
+    final role = switch ((m.json['sender'] as Map?)?['role']) { 'TEACHER' => 'معلم', 'SUPERVISOR' => 'مشرف', _ => '' };
+    final appt = m.json['appointment'] as Map?;
+    final gone = appt?['cancelled'] == true;
+    return Align(
+      alignment: mine ? AlignmentDirectional.centerEnd : AlignmentDirectional.centerStart,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * .8),
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: (isLink || isAppt) ? Ya.warnBg : mine ? const Color(0xFFD3EAEF) : Colors.white,
+          borderRadius: BorderRadiusDirectional.only(
+            topStart: const Radius.circular(16),
+            topEnd: const Radius.circular(16),
+            bottomStart: Radius.circular(mine ? 16 : 4),
+            bottomEnd: Radius.circular(mine ? 4 : 16),
+          ),
+          boxShadow: [BoxShadow(color: Ya.ink.withValues(alpha: .05), blurRadius: 12, offset: const Offset(0, 4))],
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          if (!mine && m.senderName != null)
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              Text(m.senderName!, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Ya.strong)),
+              if (role.isNotEmpty) ...[const SizedBox(width: 6), Pill(role)],
+            ]),
+          if (m.deleted) const Text('تم حذف هذه الرسالة', style: TextStyle(color: Ya.muted, fontStyle: FontStyle.italic)),
+          if (!m.deleted && isAppt)
+            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('🕒 ', style: TextStyle(fontSize: 18)),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(gone ? 'موعد ملغي' : 'موعد جديد', style: TextStyle(fontWeight: FontWeight.w700, decoration: gone ? TextDecoration.lineThrough : null)),
+                if (appt != null) Text(fappt(DateTime.parse('${appt['startsAt']}'))),
+                if ((m.text ?? '').isNotEmpty) Text(m.text!, style: const TextStyle(color: Ya.muted, fontSize: 13)),
+              ])),
+            ]),
+          if (!m.deleted && isImg) ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.network(api.absolute(m.fileUrl!), width: 220, fit: BoxFit.cover)),
+          if (!m.deleted && m.kind == 'PDF' && m.fileUrl != null)
+            TextButton.icon(onPressed: () => launchUrl(Uri.parse(api.absolute(m.fileUrl!)), mode: LaunchMode.externalApplication), icon: const Icon(Icons.picture_as_pdf_rounded), label: Text(m.fileName ?? 'ملف PDF')),
+          if (!m.deleted && !isAppt && (m.text ?? '').isNotEmpty)
+            isLink
+                ? Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                    const Text('رابط الحصة', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Ya.warn)),
+                    const SizedBox(height: 8),
+                    GradButton(
+                      height: 44,
+                      icon: Icons.add_link_rounded,
+                      label: 'انضمام للحصة (Zoom)',
+                      onPressed: () {
+                        final url = RegExp(r'https?://\S+').firstMatch(m.text!)?.group(0);
+                        if (url == null) return;
+                        // remember when a student opened the link (a hint for the teacher's attendance)
+                        if (context.read<AuthState>().isStudent) {
+                          final cid = (m.json['courseId'] ?? '') as String;
+                          if (cid.isNotEmpty) api.post('/courses/$cid/attendance/join').catchError((_) => <String, dynamic>{});
+                        }
+                        launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+                      },
+                    ),
+                  ])
+                : SelectableText(m.text!, style: const TextStyle(fontSize: 14.5, height: 1.8)),
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Text(fdt(m.createdAt), style: const TextStyle(fontSize: 11, color: Ya.muted)),
+              if (!mine && !sup && !m.deleted && !isLink && !isAppt) ...[
+                const SizedBox(width: 10),
+                GestureDetector(onTap: onReport, child: const Text('إبلاغ', style: TextStyle(fontSize: 12, color: Ya.muted, fontWeight: FontWeight.w600))),
+              ],
+              if (sup && !m.deleted) ...[
+                const SizedBox(width: 10),
+                GestureDetector(onTap: onDelete, child: const Text('حذف', style: TextStyle(fontSize: 12, color: Ya.danger, fontWeight: FontWeight.w600))),
+                if (m.senderId != null && (m.json['sender'] as Map?)?['role'] != 'SUPERVISOR') ...[
+                  const SizedBox(width: 10),
+                  GestureDetector(onTap: () => onMute(m.senderId!), child: const Text('كتم', style: TextStyle(fontSize: 12, color: Ya.danger, fontWeight: FontWeight.w600))),
+                ],
+              ],
+            ]),
+          ),
+        ]),
+      ),
+    );
+  }
+}

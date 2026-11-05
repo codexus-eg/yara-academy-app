@@ -1,0 +1,591 @@
+import 'package:flutter/material.dart';
+import 'tour.dart';
+import 'package:provider/provider.dart';
+
+import '../core/api.dart';
+import '../core/models.dart';
+import '../core/sheet.dart';
+import '../core/theme.dart';
+import '../core/widgets.dart';
+import 'chat.dart';
+import 'course_sheet.dart' show subjectEmoji;
+import 'session_widgets.dart';
+
+Map<String, dynamic> _counter(Course c) => (c.json['counter'] as Map?)?.cast<String, dynamic>() ?? {'done': 0, 'total': 0};
+
+void _openChat(BuildContext context, Course c) => Navigator.push(context, MaterialPageRoute<void>(builder: (_) => ChatScreen(courseId: c.id, title: c.title)));
+
+/// Teacher: her own courses with the session counter and confirm box.
+class TeacherCoursesPage extends StatefulWidget {
+  const TeacherCoursesPage({super.key});
+  @override
+  State<TeacherCoursesPage> createState() => _TeacherCoursesPageState();
+}
+
+class _TeacherCoursesPageState extends State<TeacherCoursesPage> {
+  List<Course> _courses = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final r = await context.read<Api>().get('/courses');
+      if (!mounted) return;
+      setState(() {
+        _courses = ((r['items'] as List?) ?? []).map((e) => Course(e as Map<String, dynamic>)).toList();
+        _loading = false;
+      });
+    } on ApiError catch (e) {
+      if (mounted) {
+        setState(() => _loading = false);
+        toast(context, e.message, error: true);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return YaPage(
+      title: 'كورساتي',
+      child: _loading
+          ? const Center(child: CircularProgressIndicator(color: Ya.teal))
+          : RefreshIndicator(
+              onRefresh: _load,
+              child: _courses.isEmpty
+                  ? ListView(children: const [EmptyState(title: 'مفيش كورسات لسه', hint: 'لما المشرف تسندلك كورس هيظهر هنا.')])
+                  : ListView.separated(
+                      padding: const EdgeInsets.all(16),
+                      itemCount: _courses.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 14),
+                      itemBuilder: (_, i) => Tour.wrap(i == 0 ? 'tcourse0' : null, _card(_courses[i])),
+                    ),
+            ),
+    );
+  }
+
+  Widget _card(Course c) {
+    final k = _counter(c);
+    return YaCard(
+      edge: Ya.catColor(c.categoryId),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(children: [
+          Text(subjectEmoji(c.categoryName), style: const TextStyle(fontSize: 24)),
+          const SizedBox(width: 10),
+          Expanded(child: Text(c.title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 17))),
+          if (c.chatClosed) Pill.bad('مغلقة'),
+        ]),
+        Text(c.categoryName, style: const TextStyle(color: Ya.muted, fontSize: 13)),
+        const SizedBox(height: 10),
+        Segs(k['done'] as int, k['total'] as int),
+        const SizedBox(height: 6),
+        Text('العدّاد ${k['done']} من ${k['total']}', style: const TextStyle(color: Ya.muted, fontSize: 12.5)),
+        if (c.pendingConfirmation)
+          ConfirmBox(
+            course: c,
+            onAttendance: () => showAttendanceSheet(context, c.id),
+            onConfirm: (held) async {
+              if (await confirmSession(context, c.id, held)) _load();
+            },
+          ),
+        const SizedBox(height: 12),
+        GradButton(label: 'المحادثة', icon: Icons.chat_bubble_outline_rounded, height: 44, onPressed: () => _openChat(context, c)),
+      ]),
+    );
+  }
+}
+
+/// Supervisor: categories + courses management (create / edit / delete, chat open-close, enroll, students, attendance).
+class AdminCoursesPage extends StatefulWidget {
+  const AdminCoursesPage({super.key});
+  @override
+  State<AdminCoursesPage> createState() => _AdminCoursesPageState();
+}
+
+class _AdminCoursesPageState extends State<AdminCoursesPage> {
+  List<Course> _courses = [];
+  List<Map<String, dynamic>> _cats = [], _teachers = [], _students = [];
+  bool _loading = true;
+
+  Api get _api => context.read<Api>();
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final r = await Future.wait([_api.get('/courses'), _api.get('/categories'), _api.get('/staff/teachers'), _api.get('/staff/students')]);
+      if (!mounted) return;
+      setState(() {
+        _courses = ((r[0]['items'] as List?) ?? []).map((e) => Course(e as Map<String, dynamic>)).toList();
+        _cats = ((r[1]['items'] as List?) ?? []).cast<Map<String, dynamic>>();
+        _teachers = ((r[2]['items'] as List?) ?? []).cast<Map<String, dynamic>>();
+        _students = ((r[3]['items'] as List?) ?? []).cast<Map<String, dynamic>>();
+        _loading = false;
+      });
+    } on ApiError catch (e) {
+      if (mounted) {
+        setState(() => _loading = false);
+        toast(context, e.message, error: true);
+      }
+    }
+  }
+
+  Future<void> _do(Future<void> Function() f, {String? ok}) async {
+    try {
+      await f();
+      if (ok != null && mounted) toast(context, ok);
+      await _load();
+    } on ApiError catch (e) {
+      if (mounted) toast(context, e.message, error: true);
+    }
+  }
+
+  // ---- categories ----
+  Future<void> _catForm({Map<String, dynamic>? cat}) async {
+    final name = TextEditingController(text: cat?['name'] as String? ?? '');
+    await showYaSheet<void>(
+      context,
+      (c) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Text(cat == null ? 'فئة جديدة' : 'تعديل الفئة', style: Ya.display(size: 25)),
+        Field('اسم الفئة', child: TextField(controller: name)),
+        const SizedBox(height: 16),
+        GradButton(label: 'حفظ', onPressed: () {
+          Navigator.pop(c);
+          _do(() async {
+            if (cat == null) {
+              await _api.post('/categories', body: {'name': name.text.trim()});
+            } else {
+              await _api.patch('/categories/${cat['id']}', body: {'name': name.text.trim()});
+            }
+          });
+        }),
+      ]),
+    );
+  }
+
+  Future<void> _delCat(Map<String, dynamic> k) async {
+    if (!await askConfirm(context, 'حذف الفئة؟', ok: 'حذف')) return;
+    await _do(() async => _api.delete('/categories/${k['id']}'));
+  }
+
+  // ---- courses ----
+  Future<void> _courseForm({Course? course, String? catId}) async {
+    final x = course?.json ?? <String, dynamic>{};
+    final title = TextEditingController(text: x['title'] as String? ?? '');
+    final desc = TextEditingController(text: x['description'] as String? ?? '');
+    String num(String k) => x[k] == null ? '' : '${x[k]}';
+    final total = TextEditingController(text: num('totalSessions'));
+    final price = TextEditingController(text: num('price'));
+    final pps = TextEditingController(text: num('pricePerSession'));
+    final trial = TextEditingController(text: course == null ? '0' : num('trialPrice'));
+    final wa = TextEditingController(text: x['whatsappNumber'] as String? ?? '201014206851');
+    String? cat = course?.categoryId ?? catId ?? (_cats.isNotEmpty ? _cats.first['id'] as String : null);
+    String cur = x['currency'] as String? ?? 'SAR';
+    String? teacher = (x['teacher'] as Map?)?['id'] as String?;
+    double? n(TextEditingController c) => c.text.trim().isEmpty ? null : double.tryParse(c.text.trim());
+    bool cont = false;
+    final done = TextEditingController(text: '0');
+    final picked = <String>{};
+    var q = '';
+    final sched = SchedController();
+
+    await showYaSheet<void>(
+      context,
+      (c) => StatefulBuilder(
+        builder: (c, set) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Text(course == null ? 'كورس جديد' : 'تعديل الكورس', style: Ya.display(size: 25)),
+          Field('العنوان', child: TextField(controller: title)),
+          Field('الوصف', child: TextField(controller: desc, maxLines: 3)),
+          Field('الفئة', child: DropdownButtonFormField<String>(
+            initialValue: cat,
+            isExpanded: true,
+            items: [for (final k in _cats) DropdownMenuItem(value: k['id'] as String, child: Text(k['name'] as String))],
+            onChanged: (v) => set(() => cat = v),
+          )),
+          Row(children: [
+            Expanded(child: Field('عدد الحصص', child: TextField(controller: total, keyboardType: TextInputType.number))),
+            const SizedBox(width: 10),
+            Expanded(child: Field('سعر الكورس', child: TextField(controller: price, keyboardType: TextInputType.number))),
+          ]),
+          Row(children: [
+            Expanded(child: Field('سعر الحصة (للباقات)', child: TextField(controller: pps, keyboardType: TextInputType.number))),
+            const SizedBox(width: 10),
+            Expanded(child: Field('تجريبية مجانية (0 = متاحة)', child: TextField(controller: trial, keyboardType: TextInputType.number))),
+          ]),
+          const Padding(padding: EdgeInsets.only(top: 6), child: Text('اتركي سعر الحصة فارغًا لإلغاء الباقات، والتجريبية فارغة لإلغائها (مجانية دائمًا).', style: TextStyle(color: Ya.muted, fontSize: 13))),
+          Row(children: [
+            Expanded(child: Field('العملة', child: DropdownButtonFormField<String>(
+              initialValue: cur,
+              items: [for (final k in const ['SAR', 'EGP', 'USD']) DropdownMenuItem(value: k, child: Text(k))],
+              onChanged: (v) => set(() => cur = v ?? cur),
+            ))),
+          ]),
+          Field('رقم واتساب (بكود الدولة)', child: TextField(controller: wa, textDirection: TextDirection.ltr, keyboardType: TextInputType.phone)),
+          Field('المعلم', child: DropdownButtonFormField<String?>(
+            initialValue: teacher,
+            isExpanded: true,
+            items: [
+              const DropdownMenuItem<String?>(value: null, child: Text('— بدون —')),
+              for (final t in _teachers.where((t) => t['isActive'] == true)) DropdownMenuItem<String?>(value: t['id'] as String, child: Text(t['fullName'] as String)),
+            ],
+            onChanged: (v) => set(() => teacher = v),
+          )),
+          if (course == null) ...[
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('كورس مستكمل (بدأ قبل كده)', style: TextStyle(fontWeight: FontWeight.w700)),
+              value: cont,
+              onChanged: (v) => set(() => cont = v),
+            ),
+            if (cont) ...[
+              const Text('حدد كام حصة عدّت وضيف الطلاب. كل طالب هيدخل على باقي الحصص بس بسعر الكورس اللي فوق. لازم تختار معلم.', style: TextStyle(color: Ya.muted, fontSize: 13, height: 1.6)),
+              Field('حصص عدّت', child: TextField(controller: done, keyboardType: TextInputType.number)),
+              SchedFields(sched),
+              const Padding(padding: EdgeInsets.only(top: 4), child: Text('تاريخ البداية = موعد أول حصة جاية.', style: TextStyle(color: Ya.muted, fontSize: 13))),
+              const Padding(padding: EdgeInsets.only(top: 8, bottom: 4), child: Text('اختر الطلاب', style: TextStyle(fontWeight: FontWeight.w700))),
+              TextField(
+                decoration: const InputDecoration(hintText: 'ابحث بالاسم أو الكود', prefixIcon: Icon(Icons.search_rounded)),
+                onChanged: (v) => set(() => q = v.trim().toLowerCase()),
+              ),
+              const SizedBox(height: 6),
+              Container(
+                constraints: const BoxConstraints(maxHeight: 220),
+                decoration: BoxDecoration(border: Border.all(color: Ya.line), borderRadius: BorderRadius.circular(12)),
+                child: _students.where((u) => u['isActive'] == true && ('${u['fullName']} ${u['code']}').toLowerCase().contains(q)).isEmpty
+                    ? const Padding(padding: EdgeInsets.all(12), child: Text('مفيش طلاب بالشكل ده. أضفهم من تبويب الفريق الأول.', style: TextStyle(color: Ya.muted, fontSize: 13)))
+                    : ListView(shrinkWrap: true, children: [
+                        for (final u in _students.where((u) => u['isActive'] == true && ('${u['fullName']} ${u['code']}').toLowerCase().contains(q)))
+                          CheckboxListTile(
+                            dense: true,
+                            controlAffinity: ListTileControlAffinity.leading,
+                            title: Text(u['fullName'] as String? ?? ''),
+                            subtitle: Text('${u['code'] ?? ''}', textDirection: TextDirection.ltr),
+                            value: picked.contains(u['code']),
+                            onChanged: (v) => set(() => v == true ? picked.add('${u['code']}') : picked.remove('${u['code']}')),
+                          ),
+                      ]),
+              ),
+            ],
+          ],
+          const SizedBox(height: 16),
+          GradButton(label: 'حفظ', onPressed: () {
+            Map<String, dynamic>? base;
+            var lines = <String>[];
+            if (course == null && cont) {
+              if (teacher == null) {
+                toast(c, 'اختر معلم للكورس المستكمل', error: true);
+                return;
+              }
+              try {
+                base = {'type': 'FULL', 'doneSessions': int.tryParse(done.text.trim()) ?? 0, 'amount': n(price), 'teacherId': teacher, ...sched.read()};
+              } on String catch (m) {
+                toast(c, m, error: true);
+                return;
+              }
+              lines = [...picked];
+              if (lines.isEmpty) {
+                toast(c, 'اختر طالب واحد على الأقل', error: true);
+                return;
+              }
+            }
+            final body = {
+              'title': title.text.trim(),
+              if (desc.text.trim().isNotEmpty) 'description': desc.text.trim(),
+              'categoryId': cat,
+              'totalSessions': n(total)?.toInt(),
+              'price': n(price),
+              'pricePerSession': n(pps),
+              'trialPrice': n(trial),
+              'currency': cur,
+              if (course == null) 'status': 'PUBLISHED',
+              'whatsappNumber': wa.text.trim(),
+              'teacherId': teacher,
+            };
+            Navigator.pop(c);
+            _do(() async {
+              if (course == null) {
+                final r = await _api.post('/courses', body: body);
+                if (base != null && lines.isNotEmpty) await _enrollList((r['course'] as Map)['id'] as String, lines, base);
+              } else {
+                await _api.patch('/courses/${course.id}', body: body);
+              }
+            }, ok: 'تم الحفظ');
+          }),
+        ]),
+      ),
+    );
+  }
+
+  /// Enroll students (codes or four-part names) into a course that is already running; shows a result list.
+  Future<void> _enrollList(String courseId, List<String> lines, Map<String, dynamic> base) async {
+    final results = <MapEntry<String, String>>[];
+    for (final line in lines) {
+      final body = <String, dynamic>{...base, 'courseId': courseId};
+      if (RegExp(r'^\d{4,20}\$').hasMatch(line)) {
+        body['studentCode'] = line;
+      } else {
+        body['fullName'] = line;
+      }
+      try {
+        final r = await _api.post('/subscriptions/manual', body: body);
+        final st = r['student'] as Map;
+        results.add(MapEntry('${st['fullName']}', '${st['studentCode'] ?? ''}'));
+      } on ApiError catch (e) {
+        results.add(MapEntry(line, '✗ ${e.message}'));
+      }
+    }
+    if (!mounted) return;
+    await showYaSheet<void>(
+      context,
+      (c2) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Text('تم إنشاء الكورس وإضافة الطلاب', style: Ya.display(size: 23)),
+        const SizedBox(height: 10),
+        for (final e in results)
+          Padding(padding: const EdgeInsets.only(bottom: 8), child: Row(children: [
+            Expanded(child: Text(e.key)),
+            Text(e.value, textDirection: TextDirection.ltr, style: const TextStyle(fontWeight: FontWeight.w700)),
+          ])),
+        const SizedBox(height: 10),
+        GradButton(label: 'تمام', onPressed: () => Navigator.pop(c2)),
+      ]),
+    );
+  }
+
+  Future<void> _enroll(Course course) async {
+    final code = TextEditingController(), name = TextEditingController(), n = TextEditingController(text: '1');
+    final sched = SchedController();
+    String type = 'FULL';
+    String? teacher = course.teacher?.id;
+    await showYaSheet<void>(
+      context,
+      (c) => StatefulBuilder(
+        builder: (c, set) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Text('تسجيل طالب في ${course.title}', style: Ya.display(size: 23)),
+          Field('رقم الطالب (إن كانت مسجّلة)', child: TextField(controller: code, keyboardType: TextInputType.number, textDirection: TextDirection.ltr, decoration: const InputDecoration(hintText: '123456'))),
+          Field('أو الاسم الرباعي (طالب جديدة)', child: TextField(controller: name)),
+          Field('النوع', child: DropdownButtonFormField<String>(
+            initialValue: type,
+            items: [
+              const DropdownMenuItem(value: 'FULL', child: Text('كورس كامل')),
+              if (course.trialAvailable) const DropdownMenuItem(value: 'TRIAL', child: Text('تجريبية')),
+              if (course.packagesAvailable) const DropdownMenuItem(value: 'PACKAGE', child: Text('باقة')),
+            ],
+            onChanged: (v) => set(() {
+              type = v ?? type;
+              sched.setTrial(type == 'TRIAL');
+            }),
+          )),
+          if (type == 'PACKAGE') Field('عدد الحصص', child: TextField(controller: n, keyboardType: TextInputType.number)),
+          Field('المعلم', child: DropdownButtonFormField<String?>(
+            initialValue: teacher,
+            isExpanded: true,
+            items: [
+              const DropdownMenuItem<String?>(value: null, child: Text('معلم الكورس')),
+              for (final t in _teachers.where((t) => t['isActive'] == true)) DropdownMenuItem<String?>(value: t['id'] as String, child: Text(t['fullName'] as String)),
+            ],
+            onChanged: (v) => set(() => teacher = v),
+          )),
+          SchedFields(sched),
+          const SizedBox(height: 16),
+          GradButton(label: 'تسجيل', onPressed: () async {
+            Map<String, dynamic> body;
+            try {
+              body = {'courseId': course.id, 'type': type, ...sched.read()};
+            } on String catch (m) {
+              toast(c, m, error: true);
+              return;
+            }
+            if (code.text.trim().isNotEmpty) {
+              body['studentCode'] = code.text.trim();
+            } else {
+              body['fullName'] = name.text.trim();
+            }
+            if (type == 'PACKAGE') body['sessions'] = int.tryParse(n.text.trim()) ?? 1;
+            if (teacher != null) body['teacherId'] = teacher;
+            Navigator.pop(c);
+            try {
+              final r = await _api.post('/subscriptions/manual', body: body);
+              final st = r['student'] as Map;
+              if (!mounted) return;
+              await showYaSheet<void>(
+                context,
+                (c2) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  Text('تم التسجيل ✓', style: Ya.display(size: 25)),
+                  const SizedBox(height: 8),
+                  Text('${st['fullName']}', textAlign: TextAlign.center),
+                  const SizedBox(height: 8),
+                  Center(child: Text('${st['studentCode'] ?? ''}', textDirection: TextDirection.ltr, style: Ya.display(size: 38, color: Ya.teal).copyWith(letterSpacing: 5))),
+                  const SizedBox(height: 14),
+                  GradButton(label: 'تمام', onPressed: () => Navigator.pop(c2)),
+                ]),
+              );
+              _load();
+            } on ApiError catch (e) {
+              if (mounted) toast(context, e.message, error: true);
+            }
+          }),
+        ]),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return YaPage(
+      title: 'الكورسات والفئات',
+      child: _loading
+          ? const Center(child: CircularProgressIndicator(color: Ya.teal))
+          : RefreshIndicator(
+              onRefresh: _load,
+              child: ListView(padding: const EdgeInsets.all(16), children: [
+                Tour.wrap('catbtns', Row(children: [
+                  Expanded(child: GradButton(label: '＋ فئة جديدة', height: 46, onPressed: () => _catForm())),
+                  const SizedBox(width: 10),
+                  Expanded(child: OutlinedButton(onPressed: _cats.isEmpty ? null : () => _courseForm(), child: const Text('＋ كورس جديد'))),
+                ])),
+                if (_cats.isEmpty) const EmptyState(title: 'ابدأ بإضافة فئة', hint: 'بعدها أضف كورساتها.'),
+                for (final k in _cats) ..._section(k),
+              ]),
+            ),
+    );
+  }
+
+  List<Widget> _section(Map<String, dynamic> k) {
+    final list = _courses.where((c) => c.categoryId == k['id']).toList();
+    return [
+      const SizedBox(height: 18),
+      Row(children: [
+        Expanded(child: Text('${subjectEmoji(k['name'] as String?)} ${k['name']} (${list.length})', style: Ya.display(size: 21))),
+        IconButton(onPressed: () => _courseForm(catId: k['id'] as String), icon: const Icon(Icons.add_circle_outline_rounded, color: Ya.strong), tooltip: 'كورس'),
+        IconButton(onPressed: () => _catForm(cat: k), icon: const Icon(Icons.edit_outlined, color: Ya.strong), tooltip: 'تعديل'),
+        IconButton(onPressed: () => _delCat(k), icon: const Icon(Icons.delete_outline_rounded, color: Ya.danger), tooltip: 'حذف'),
+      ]),
+      if (list.isEmpty) const Padding(padding: EdgeInsets.all(14), child: Text('لا توجد كورسات في هذه الفئة', textAlign: TextAlign.center, style: TextStyle(color: Ya.muted))),
+      for (final c in list) Padding(padding: const EdgeInsets.only(top: 10), child: Tour.wrap(identical(c, _courses.first) ? 'acourse0' : null, _card(c))),
+    ];
+  }
+
+  Widget _card(Course c) {
+    final k = _counter(c);
+    final st = c.json['status'] as String? ?? 'DRAFT';
+    Widget btn(String t, VoidCallback f, {bool danger = false}) => SizedBox(
+          height: 38,
+          child: OutlinedButton(
+            style: OutlinedButton.styleFrom(minimumSize: const Size(0, 38), padding: const EdgeInsets.symmetric(horizontal: 14), foregroundColor: danger ? Ya.danger : Ya.ink),
+            onPressed: f,
+            child: Text(t, style: const TextStyle(fontSize: 13.5)),
+          ),
+        );
+    return YaCard(
+      edge: Ya.catColor(c.categoryId),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(children: [
+          Expanded(child: Text('${subjectEmoji(c.categoryName)} ${c.title}', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16.5))),
+          st == 'PUBLISHED' ? Pill.ok('منشور') : Pill(st == 'ARCHIVED' ? 'مؤرشف' : 'مسودة', bg: const Color(0xFFEDF1F3), fg: Ya.muted),
+        ]),
+        Text('${c.totalSessions} حصة · ${c.price.toStringAsFixed(0)} ${c.currency == 'SAR' ? 'ر.س' : c.currency}', style: const TextStyle(color: Ya.muted, fontSize: 13)),
+        Text('المعلم: ${c.teacher?.name ?? 'غير محددة'} · ${c.json['activeStudents'] ?? 0} نشط', style: const TextStyle(color: Ya.muted, fontSize: 13)),
+        const SizedBox(height: 8),
+        Segs(k['done'] as int, k['total'] as int),
+        if (c.pendingConfirmation)
+          ConfirmBox(
+            course: c,
+            onAttendance: () => showAttendanceSheet(context, c.id),
+            onConfirm: (held) async {
+              if (await confirmSession(context, c.id, held)) _load();
+            },
+          ),
+        const SizedBox(height: 10),
+        Wrap(spacing: 8, runSpacing: 8, children: [
+          btn('💬 الشات', () => _openChat(context, c)),
+          btn('الطلاب', () => Navigator.push(context, MaterialPageRoute<void>(builder: (_) => MembersScreen(course: c)))),
+          btn('👥 الحضور', () => showAttendanceSheet(context, c.id)),
+          btn('تعديل', () => _courseForm(course: c)),
+          btn('تسجيل طالب', () => _enroll(c)),
+          btn(c.chatClosed ? 'فتح الشات' : 'قفل الشات', () => _do(() async => _api.post('/courses/${c.id}/chat/${c.chatClosed ? 'open' : 'close'}'))),
+          btn('حذف', () async {
+            if (await askConfirm(context, 'حذف الكورس نهائيًا؟', ok: 'حذف')) await _do(() async => _api.delete('/courses/${c.id}'));
+          }, danger: true),
+        ]),
+      ]),
+    );
+  }
+}
+
+/// Students of a course with progress.
+class MembersScreen extends StatefulWidget {
+  const MembersScreen({super.key, required this.course});
+  final Course course;
+  @override
+  State<MembersScreen> createState() => _MembersScreenState();
+}
+
+class _MembersScreenState extends State<MembersScreen> {
+  List<Map<String, dynamic>>? _m;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final r = await context.read<Api>().get('/courses/${widget.course.id}/members');
+      if (mounted) setState(() => _m = ((r['items'] as List?) ?? []).cast<Map<String, dynamic>>());
+    } on ApiError catch (e) {
+      if (mounted) {
+        setState(() => _m = []);
+        toast(context, e.message, error: true);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final m = _m;
+    return YaPage(
+      title: 'الطلاب',
+      subtitle: widget.course.title,
+      back: true,
+      child: m == null
+          ? const Center(child: CircularProgressIndicator(color: Ya.teal))
+          : m.isEmpty
+              ? const EmptyState(title: 'مفيش طلاب', hint: 'هتظهر هنا الطلاب المشتركات في الكورس.')
+              : ListView.separated(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: m.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 12),
+                  itemBuilder: (_, i) {
+                    final x = m[i];
+                    final st = x['student'] as Map? ?? {};
+                    final p = (x['progress'] as Map?) ?? {};
+                    final status = x['status'] as String? ?? '';
+                    final sub = Subscription({'id': '', 'status': status, 'type': x['type'] ?? ''});
+                    return YaCard(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                        Row(children: [
+                          Expanded(child: Text('${st['fullName'] ?? ''}${(st['studentCode'] ?? '').toString().isNotEmpty ? '  ${st['studentCode']}' : ''}', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16))),
+                          status == 'ACTIVE' ? Pill.ok(sub.statusLabel) : Pill(sub.statusLabel),
+                        ]),
+                        const SizedBox(height: 2),
+                        Text(sub.typeLabel, style: const TextStyle(color: Ya.muted, fontSize: 13)),
+                        const SizedBox(height: 8),
+                        Segs((p['done'] ?? 0) as int, (p['total'] ?? 0) as int),
+                        const SizedBox(height: 4),
+                        Text('${p['done'] ?? 0} من ${p['total'] ?? 0}', style: const TextStyle(color: Ya.muted, fontSize: 12.5)),
+                      ]),
+                    );
+                  },
+                ),
+    );
+  }
+}

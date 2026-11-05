@@ -1,0 +1,305 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+import '../core/theme.dart';
+import '../core/widgets.dart';
+
+/// Registry of tour targets: wrap a widget with Tour.wrap('id', child) and a step can spotlight it.
+class Tour {
+  static final _keys = <String, GlobalKey>{};
+  static GlobalKey k(String id) => _keys.putIfAbsent(id, () => GlobalKey(debugLabel: 'tour_$id'));
+  static Widget wrap(String? id, Widget child) => id == null ? child : KeyedSubtree(key: k(id), child: child);
+  /// Set by the student's courses page so the tour can open / close a course sheet.
+  static VoidCallback? openCourse, closeSheet;
+  static bool sheetOpen = false;
+}
+
+class TourStep {
+  const TourStep(this.tab, this.target, this.title, this.body, {this.mascot = 'owl', this.sheet = false});
+  final int tab;
+  final bool sheet; // needs a course sheet open on top
+  final String? target;
+  final String title, body, mascot;
+}
+
+const tourSteps = <String, List<TourStep>>{
+  'LOGIN': [
+    TourStep(0, null, 'أهلاً بك في أكاديمية يارا', 'دروس أونلاين مع معلمين متخصصين. جولة سريعة على طريقة الدخول.'),
+    TourStep(0, 'lg_code', 'كود الدخول', 'اكتب كودك هنا. مفيش كلمة مرور ولا إيميل، الكود بس.', mascot: 'shield'),
+    TourStep(0, 'lg_btn', 'دخول', 'اضغط الزرار وهتفتح لك صفحتك على طول.'),
+    TourStep(0, 'lg_reg', 'طالب جديد؟', 'لو معندكش كود اضغط هنا واكتب اسمك الرباعي، وهنديك كود تحتفظ به للدخول من أي جهاز.', mascot: 'fox'),
+    TourStep(0, 'helpbuddy', 'محتاج مساعدة؟', 'اضغط على الثعلب في أي وقت وكلّمنا على واتساب، وهنساعدك.', mascot: 'fox'),
+  ],
+  'STUDENT': [
+    TourStep(0, null, 'مرحباً بك في أكاديمية يارا', 'دروس فردية أونلاين مع معلمين متخصصين. جولة سريعة تعرّفك على التطبيق.'),
+    TourStep(0, 'helpbuddy', 'مساعدك السريع', 'الثعلب ده زرار المساعدة: اضغط عليه في أي وقت يحوّلك على واتساب الدعم تسأل أي سؤال.', mascot: 'fox'),
+    TourStep(0, 'hero', 'الصفحة الرئيسية', 'من هنا تبدأ الرحلة: تحية، ثم كل الكورسات المتاحة في مكان واحد.', mascot: 'fox'),
+    TourStep(0, 'nav0', 'شريط التنقل', 'ثلاثة أقسام: الكورسات لتصفّح المواد، وكورساتي لمتابعة اشتراكاتك، وحسابي.'),
+    TourStep(0, 'cats', 'الفئات', 'اضغط على أي مادة لعرض كورساتها فقط، أو اختر "الكل" للعودة لكل الكورسات.', mascot: 'robot'),
+    TourStep(0, 'course0', 'بطاقة الكورس', 'تعرض اسم الكورس وفئته وعدد حصصه وسعره. اضغط عليها لعرض التفاصيل والحجز.'),
+    TourStep(0, 'bk_opts', 'أنواع الاشتراك', 'اختر جلسة تجريبية لتجربة المعلم، أو باقة تحدّد عدد حصصها بالأزرار + و −، أو الكورس كاملاً. السعر يتحدّث حسب اختيارك.', mascot: 'fox', sheet: true),
+    TourStep(0, 'bk_btn', 'الحجز عبر واتساب', 'بالضغط على الزرار يوصل طلبك للمشرف فوراً ويفتح واتساب برسالة جاهزة فيها الكورس والمبلغ. وبعد تأكيد الدفع من الإدارة تبدأ حصصك.', sheet: true),
+    TourStep(1, 'sub0', 'اشتراكاتك', 'لكل اشتراك حالته (بانتظار الدفع، قيد المراجعة، فعّال، مكتمل) وعدّاد الحصص. اضغط على الاشتراك الفعّال لدخول محادثة الكورس فيها رابط Zoom وملفات المعلم.', mascot: 'fox'),
+    TourStep(2, 'acct', 'حسابك', 'اسمك ورقم الطالب الخاص بك. احتفظ به لتسجيل الدخول من أي جهاز بدون كلمة مرور.', mascot: 'shield'),
+    TourStep(2, 'support', 'دعم واتساب', 'عندك أي سؤال أو مشكلة؟ اضغط الزرار وكلّمنا مباشرة على واتساب وهنرد عليك.', mascot: 'fox'),
+    TourStep(2, 'redo', 'إعادة الجولة', 'تقدرين تشوفين هذه الجولة متى شئتِ من هنا.'),
+  ],
+  'TEACHER': [
+    TourStep(0, null, 'مرحباً بك في أكاديمية يارا', 'جولة سريعة تعرّفك على ما تحتاجه كمعلم.'),
+    TourStep(0, 'tcourse0', 'كورساتك', 'كل كورس مُسند إليك في بطاقة فيها فئته وعدّاد الحصص. بعد إرسال رابط Zoom يظهر سؤال "هل تمت الحصة؟": "تمت" تقدّم العدّاد، و"لم تتم" لا تغيّره، و"الحضور" لتسجيل الحاضر والغائب.', mascot: 'fox'),
+    TourStep(1, 'logfilter', 'سجل الحصص', 'فلتر الحصص: الكل، أو التي تمت، أو التي لم تتم.', mascot: 'robot'),
+    TourStep(1, 'logsum', 'ملخص', 'إجمالي الحصص، وكم منها تمت وكم لم تتم.'),
+    TourStep(2, 'acct', 'حسابك', 'عدّلي نبذتك وتخصصك الظاهرين للطلاب في بطاقة الكورس.', mascot: 'shield'),
+    TourStep(2, 'redo', 'إعادة الجولة', 'تقدرين تشوفين هذه الجولة متى شئتِ من هنا.'),
+  ],
+  'SUPERVISOR': [
+    TourStep(0, null, 'مرحباً بك في أكاديمية يارا', 'جولة سريعة على لوحة المشرف.'),
+    TourStep(0, 'reqsearch', 'البحث', 'ابحث عن أي طلب باسم الطالب أو رقمها. الطلبات اللي قيد المراجعة تظهر في الأول.', mascot: 'fox'),
+    TourStep(0, 'req0', 'بطاقة الطلب', 'اسم الطالب والكورس والمبلغ. بعد التأكد من الدفع اضغط موافقة واختر المعلم والأيام والوقت فتُولَّد الحصص تلقائياً، أو ارفض مع ذكر السبب.'),
+    TourStep(1, 'catbtns', 'الفئات والكورسات', 'أضف فئة جديدة أو كورساً جديداً بالاسم والسعر وعدد الحصص والمعلم.', mascot: 'robot'),
+    TourStep(1, 'acourse0', 'بطاقة الكورس', 'حالته ومعلمته وعدد الطلاب. منها: الطلاب والحضور، تسجيل طالب يدوياً، ومحادثة الكورس لإرسال Zoom وكتم عضو أو حذف رسالة.'),
+    TourStep(2, 'teambtn', 'إضافة معلم', 'أدخل الاسم والنبذة والتخصص وسيُنشأ له كود دخول من 6 أرقام.'),
+    TourStep(2, 'team0', 'بطاقة المعلم', 'أصدر كوداً جديداً أو أوقف الحساب مؤقتاً دون حذفه.'),
+    TourStep(3, 'logfilter', 'السجل', 'كل أحداث الحصص لجميع الكورسات مع فلتر تمت / لم تتم.', mascot: 'shield'),
+    TourStep(4, 'redo', 'إعادة الجولة', 'تقدرين تشوفين هذه الجولة متى شئتِ من هنا.'),
+  ],
+};
+
+const _store = FlutterSecureStorage();
+
+Future<bool> tourSeen(String role) async {
+  try {
+    return await _store.read(key: 'ya_coach_$role') == '1';
+  } catch (_) {
+    return true;
+  }
+}
+
+bool _running = false;
+
+/// Spotlight tour: dims everything except the feature being explained. [onTab] switches the page behind it.
+Future<void> showTour(BuildContext context, String role, void Function(int) onTab) async {
+  final steps = tourSteps[role];
+  if (steps == null || _running) return;
+  _running = true;
+  final done = Completer<void>();
+  late OverlayEntry entry;
+  final ov = Overlay.of(context, rootOverlay: true);
+  final gk = GlobalKey();
+  entry = OverlayEntry(builder: (_) => _TourOverlay(key: gk, steps: steps, onTab: onTab, onRaise: () {
+        // a sheet opened above us: take the tour back to the top (same frame, so its state is kept)
+        entry.remove();
+        ov.insert(entry);
+      }, onEnd: () {
+        if (Tour.sheetOpen) Tour.closeSheet?.call();
+        entry.remove();
+        if (!done.isCompleted) done.complete();
+      }));
+  ov.insert(entry);
+  await done.future;
+  _running = false;
+  try {
+    await _store.write(key: 'ya_coach_$role', value: '1');
+  } catch (_) {}
+}
+
+class _TourOverlay extends StatefulWidget {
+  const _TourOverlay({super.key, required this.steps, required this.onTab, required this.onEnd, required this.onRaise});
+  final List<TourStep> steps;
+  final void Function(int) onTab;
+  final VoidCallback onRaise;
+  final VoidCallback onEnd;
+  @override
+  State<_TourOverlay> createState() => _TourOverlayState();
+}
+
+class _TourOverlayState extends State<_TourOverlay> with SingleTickerProviderStateMixin {
+  int _i = -1;
+  Rect? _hole, _prev;
+  bool _busy = false;
+  int _tab = -1;
+  late final AnimationController _ac = AnimationController(vsync: this, duration: const Duration(milliseconds: 260));
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _go(0, 1));
+  }
+
+  @override
+  void dispose() {
+    _ac.dispose();
+    super.dispose();
+  }
+
+  Future<void> _go(int n, int dir) async {
+    if (_busy) return;
+    _busy = true;
+    while (n >= 0 && n < widget.steps.length) {
+      final st = widget.steps[n];
+      if (st.sheet && !Tour.sheetOpen) {
+        Tour.openCourse?.call();
+        await Future<void>.delayed(const Duration(milliseconds: 340));
+        if (!mounted) return;
+        widget.onRaise();
+        await Future<void>.delayed(const Duration(milliseconds: 16));
+      } else if (!st.sheet && Tour.sheetOpen) {
+        Tour.closeSheet?.call();
+        await Future<void>.delayed(const Duration(milliseconds: 260));
+      }
+      if (!mounted) return;
+      if (st.tab != _tab) {
+        _tab = st.tab;
+        widget.onTab(st.tab);
+        await Future<void>.delayed(const Duration(milliseconds: 50)); // one rebuild of the new tab
+      }
+      if (!mounted) return;
+      Rect? r;
+      if (st.target != null) {
+        var ctx = Tour.k(st.target!).currentContext;
+        for (var w = 0; ctx == null && w < 15 && mounted; w++) {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+          ctx = Tour.k(st.target!).currentContext;
+        }
+        if (!mounted) return;
+        if (ctx != null) {
+          final h = MediaQuery.of(context).size.height;
+          var ro0 = ctx.mounted ? ctx.findRenderObject() : null;
+          final seen = ro0 is RenderBox && ro0.attached && ro0.hasSize && ro0.localToGlobal(Offset.zero).dy > 110 && ro0.localToGlobal(Offset.zero).dy + ro0.size.height < h - 130;
+          if (!seen) {
+            try {
+              await Scrollable.ensureVisible(ctx, alignment: 0.2, duration: const Duration(milliseconds: 100), curve: Curves.easeOut);
+            } catch (_) {}
+          }
+          final ro = ctx.mounted ? ctx.findRenderObject() : null;
+          if (ro is RenderBox && ro.attached && ro.hasSize && ro.size.height > 4 && ro.size.width > 4) {
+            r = (ro.localToGlobal(Offset.zero) & ro.size).inflate(6);
+            final maxH = MediaQuery.of(context).size.height * 0.34;
+            if (r.height > maxH) r = Rect.fromLTWH(r.left, r.top, r.width, maxH);
+          }
+        }
+        if (r == null) {
+          n += dir; // nothing to show here (empty list): skip, like the website
+          continue;
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        _prev = _hole ?? (_i < 0 ? null : _hole);
+        _i = n;
+        _hole = r;
+      });
+      _ac.forward(from: 0);
+      _busy = false;
+      return;
+    }
+    _busy = false;
+    if (n >= widget.steps.length) widget.onEnd();
+  }
+
+  Rect? _cur() {
+    final a = _prev, b = _hole;
+    final t = Curves.easeInOutCubic.transform(_ac.value);
+    if (a == null && b == null) return null;
+    if (a == null) return Rect.lerp(Rect.fromCenter(center: b!.center, width: b.width * 1.25, height: b.height * 1.25), b, t);
+    if (b == null) return Rect.lerp(a, Rect.fromCenter(center: a.center, width: a.width * 1.25, height: a.height * 1.25), t);
+    return Rect.lerp(a, b, t);
+  }
+
+  Widget _card(TourStep s, bool last) => Material(
+        color: Colors.transparent,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(18, 14, 18, 12),
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24), boxShadow: Ya.cardShadow),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Row(children: [
+              Mascot(s.mascot, size: 50),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('${_i + 1} / ${widget.steps.length}', textDirection: TextDirection.ltr, style: const TextStyle(color: Ya.muted, fontSize: 12)),
+                  Text(s.title, style: Ya.display(size: 21)),
+                ]),
+              ),
+            ]),
+            const SizedBox(height: 6),
+            Text(s.body, style: const TextStyle(fontSize: 14, height: 1.7, color: Ya.ink)),
+            const SizedBox(height: 10),
+            Row(children: [
+              if (!last) TextButton(onPressed: widget.onEnd, child: const Text('تخطّي')),
+              const Spacer(),
+              if (_i > 0) OutlinedButton(onPressed: () => _go(_i - 1, -1), child: const Text('السابق')),
+              const SizedBox(width: 8),
+              SizedBox(width: 112, child: GradButton(label: last ? 'فهمت 👍' : 'التالي', height: 42, onPressed: () => last ? widget.onEnd() : _go(_i + 1, 1))),
+            ]),
+          ]),
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    if (_i < 0) return const SizedBox.shrink();
+    final s = widget.steps[_i];
+    final last = _i == widget.steps.length - 1;
+    final size = MediaQuery.of(context).size;
+    final r = _hole;
+    final below = r == null ? true : (size.height - r.bottom >= 260 || size.height - r.bottom >= r.top);
+    final card = _card(s, last);
+    final Widget placed = r == null
+        ? Center(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: card))
+        : below
+            ? Align(alignment: Alignment.topCenter, child: Padding(padding: EdgeInsets.fromLTRB(16, (r.bottom + 12).clamp(12, size.height - 240), 16, 0), child: card))
+            : Align(alignment: Alignment.bottomCenter, child: Padding(padding: EdgeInsets.fromLTRB(16, 0, 16, (size.height - r.top + 12).clamp(12, size.height - 240)), child: card));
+    return Directionality(
+      textDirection: TextDirection.rtl,
+      child: Stack(children: [
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {},
+            child: AnimatedBuilder(animation: _ac, builder: (_, _) => CustomPaint(painter: _Dim(_cur(), _ac.value))),
+          ),
+        ),
+        Positioned.fill(
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 320),
+            switchInCurve: Curves.easeOutCubic,
+            switchOutCurve: Curves.easeIn,
+            layoutBuilder: (cur, prev) => Stack(fit: StackFit.expand, children: [...prev, if (cur != null) cur]),
+            transitionBuilder: (child, a) => FadeTransition(
+              opacity: a,
+              child: SlideTransition(position: Tween<Offset>(begin: const Offset(0, 0.05), end: Offset.zero).animate(a), child: child),
+            ),
+            child: KeyedSubtree(key: ValueKey(_i), child: placed),
+          ),
+        ),
+      ]),
+    );
+  }
+}
+
+class _Dim extends CustomPainter {
+  _Dim(this.hole, this.t);
+  final Rect? hole;
+  final double t;
+  @override
+  void paint(Canvas canvas, Size size) {
+    final dim = Paint()..color = const Color(0xFF14283A).withValues(alpha: 0.66);
+    var p = Path()..addRect(Offset.zero & size);
+    if (hole != null) {
+      final rr = RRect.fromRectAndRadius(hole!, const Radius.circular(18));
+      p = Path.combine(PathOperation.difference, p, Path()..addRRect(rr));
+      canvas.drawPath(p, dim);
+      canvas.drawRRect(rr, Paint()..style = PaintingStyle.stroke..strokeWidth = 2.5..color = Ya.gold);
+      // soft pulse ring that settles as the highlight arrives
+      canvas.drawRRect(rr.inflate(8 * (1 - t)), Paint()..style = PaintingStyle.stroke..strokeWidth = 2..color = Ya.gold.withValues(alpha: 0.5 * (1 - t)));
+    } else {
+      canvas.drawPath(p, dim);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_Dim o) => o.hole != hole || o.t != t;
+}

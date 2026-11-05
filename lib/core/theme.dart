@@ -1,0 +1,111 @@
+import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
+
+/// Look & feel copied from the Yara website: soft gradient background, frosted rounded header,
+/// white cards with a hairline border, teal gradient buttons with a coloured shadow, pastel chips.
+class Ya {
+  static const ink = Color(0xFF1B2744);
+  static const muted = Color(0xFF5B6585);
+  static const line = Color(0xFFE8EEEC);
+  static const teal = Color(0xFF2A8F8B);
+  static const tealLight = Color(0xFF3DB1AB);
+  static const strong = Color(0xFF1F6F73);
+  static const soft = Color(0xFFE2F2F0);
+  static const gold = Color(0xFFF2B84B);
+  static const bg = Color(0xFFEFF6F5);
+  static const bgTop = Color(0xFFFDFEFD);
+  static const card = Colors.white;
+  static const ok = Color(0xFF0F7A58);
+  static const okBg = Color(0xFFDCF3E9);
+  static const danger = Color(0xFFBE3350);
+  static const dangerBg = Color(0xFFFCE4E8);
+  static const warn = Color(0xFF7C5100);
+  static const warnBg = Color(0xFFFBF0D6);
+  static const wa = Color(0xFF12904B);
+
+  static const catColors = [
+    Color(0xFF4BA67A), Color(0xFF8A7CCB), Color(0xFF4F8FD0), Color(0xFFE0A83A), Color(0xFFE07F5A),
+  ];
+
+  static Color catColor(String? id) {
+    if (id == null || id.isEmpty) return teal;
+    return catColors[id.codeUnits.fold<int>(0, (a, b) => a + b) % catColors.length];
+  }
+
+  static const bgGradient = LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [bgTop, bg]);
+  static const btnGradient = LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [tealLight, teal]);
+  static const waGradient = LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xFF1FA463), Color(0xFF128C4A)]);
+
+  static final cardShadow = [
+    BoxShadow(color: ink.withValues(alpha: .05), blurRadius: 2, offset: const Offset(0, 1)),
+    BoxShadow(color: ink.withValues(alpha: .06), blurRadius: 22, offset: const Offset(0, 8)),
+  ];
+
+  /// Baloo Bhaijaan 2: titles and prices (the website's display face)
+  static TextStyle display({double size = 26, Color color = ink}) =>
+      GoogleFonts.balooBhaijaan2(fontSize: size, fontWeight: FontWeight.w800, color: color, height: 1.3);
+
+  static ThemeData theme() {
+    final scheme = ColorScheme.fromSeed(seedColor: teal, primary: teal, secondary: gold, surface: Colors.white);
+    final base = ThemeData(useMaterial3: true, colorScheme: scheme, brightness: Brightness.light);
+    return base.copyWith(
+      scaffoldBackgroundColor: Colors.transparent,
+      textTheme: GoogleFonts.ibmPlexSansArabicTextTheme(base.textTheme).apply(bodyColor: ink, displayColor: ink),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: Colors.white,
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Color(0xFFE1E8EB), width: 1.5)),
+        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Color(0xFFE1E8EB), width: 1.5)),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: tealLight, width: 2)),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      ),
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(
+          backgroundColor: teal, foregroundColor: Colors.white, minimumSize: const Size(0, 48),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          textStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+        ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: ink, minimumSize: const Size(0, 46), side: const BorderSide(color: Color(0xFFE1E8EB), width: 1.5),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          textStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+        ),
+      ),
+      dialogTheme: DialogThemeData(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26))),
+    );
+  }
+}
+
+const _days = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+const _months = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
+
+/// "الأحد 18 أكتوبر"
+String fday(DateTime d) => '${_days[d.weekday % 7]} ${d.day} ${_months[d.month - 1]}';
+
+/// "5:00 م"
+String ftime(DateTime d) {
+  final h = d.hour % 12 == 0 ? 12 : d.hour % 12;
+  return '$h:${d.minute.toString().padLeft(2, '0')} ${d.hour < 12 ? 'ص' : 'م'}';
+}
+
+/// "18 أكتوبر، 1:21 م"
+String fdt(DateTime d) => '${d.day} ${_months[d.month - 1]}، ${ftime(d)}';
+
+/// Appointment time in Riyadh (UTC+3)
+String fappt(DateTime utc) {
+  final r = utc.toUtc().add(const Duration(hours: 3));
+  return '${_days[r.weekday % 7]} ${r.day} ${_months[r.month - 1]} ${ftime(r)}';
+}
+
+void toast(BuildContext c, String msg, {bool error = false}) {
+  ScaffoldMessenger.of(c)
+    ..hideCurrentSnackBar()
+    ..showSnackBar(SnackBar(
+      content: Text(msg, style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.white)),
+      backgroundColor: error ? Ya.danger : Ya.ink,
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+    ));
+}

@@ -1,0 +1,115 @@
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import '../core/api.dart';
+import '../core/theme.dart';
+import '../core/widgets.dart';
+import 'chat.dart';
+
+/// Teacher / supervisor: the students of one course. Every student has her own chat, appointment and session.
+class ThreadsScreen extends StatefulWidget {
+  const ThreadsScreen({super.key, required this.courseId, required this.title});
+  final String courseId, title;
+  @override
+  State<ThreadsScreen> createState() => _ThreadsScreenState();
+}
+
+class _ThreadsScreenState extends State<ThreadsScreen> {
+  List<Map<String, dynamic>> _items = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final r = await context.read<Api>().get('/courses/${widget.courseId}/threads');
+      if (!mounted) return;
+      setState(() {
+        _items = ((r['items'] as List?) ?? []).cast<Map<String, dynamic>>();
+        _loading = false;
+      });
+    } on ApiError catch (e) {
+      if (mounted) {
+        setState(() => _loading = false);
+        toast(context, e.message, error: true);
+      }
+    }
+  }
+
+  Future<void> _open(Map<String, dynamic> t) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute<void>(builder: (_) => ChatScreen(courseId: widget.courseId, title: t['fullName'] as String? ?? widget.title, studentId: t['studentId'] as String)),
+    );
+    if (mounted) _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return YaPage(
+      title: widget.title,
+      back: true,
+      child: _loading
+          ? const Center(child: CircularProgressIndicator(color: Ya.teal))
+          : RefreshIndicator(
+              onRefresh: _load,
+              child: _items.isEmpty
+                  ? ListView(children: const [EmptyState(title: 'مفيش طلاب لسه', hint: 'لما طالب يتفعّل اشتراكه هيظهر هنا بمحادثته الخاصة.')])
+                  : ListView.separated(
+                      padding: const EdgeInsets.all(16),
+                      itemCount: _items.length + 1,
+                      separatorBuilder: (_, _) => const SizedBox(height: 12),
+                      itemBuilder: (_, i) {
+                        if (i == 0) {
+                          return const Text('لكل طالب محادثة وموعد وحصة خاصة به. اضغط على الطالب لفتح محادثته.', style: TextStyle(color: Ya.muted, fontSize: 13, height: 1.6));
+                        }
+                        return _card(_items[i - 1]);
+                      },
+                    ),
+            ),
+    );
+  }
+
+  Widget _card(Map<String, dynamic> t) {
+    final p = (t['progress'] as Map?) ?? {};
+    final next = t['nextAppointment'] as Map?;
+    final last = t['lastMessage'] as Map?;
+    final code = t['studentCode'] as String?;
+    final teacher = (t['teacher'] as Map?)?['fullName'] as String?;
+    final pending = t['pendingConfirmation'] == true;
+    final done = t['status'] == 'COMPLETED';
+    final lastText = last == null
+        ? null
+        : (last['text'] as String?)?.trim().isNotEmpty == true
+            ? (last['text'] as String).length > 40 ? '${(last['text'] as String).substring(0, 40)}…' : last['text'] as String
+            : switch (last['kind']) { 'ZOOM_LINK' => 'رابط الحصة', 'APPOINTMENT' => 'موعد', _ => 'ملف' };
+    return GestureDetector(
+      onTap: () => _open(t),
+      child: YaCard(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Row(children: [
+            Expanded(child: Text('${t['fullName']}${code != null ? '  ($code)' : ''}', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16))),
+            if (pending) Pill.bad('⏰ بانتظار التأكيد') else if (done) const Pill('مكتمل', bg: Color(0xFFEDF1F3), fg: Ya.muted),
+          ]),
+          if (teacher != null) Text('المعلم: $teacher', style: const TextStyle(color: Ya.muted, fontSize: 13)),
+          const SizedBox(height: 8),
+          Segs((p['done'] ?? 0) as int, (p['total'] ?? 0) as int),
+          const SizedBox(height: 4),
+          Text('${p['done'] ?? 0} من ${p['total'] ?? 0} حصة', style: const TextStyle(color: Ya.muted, fontSize: 12.5)),
+          const SizedBox(height: 6),
+          if (next != null) ...[
+            Text('🕒 الموعد القادم', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+            Text('السعودية: ${(next['display'] as Map)['saudi']}', style: const TextStyle(fontSize: 13)),
+            Text('مصر: ${(next['display'] as Map)['egypt']}', style: const TextStyle(fontSize: 13, color: Ya.muted)),
+          ] else
+            const Text('لا يوجد موعد محدد', style: TextStyle(color: Ya.muted, fontSize: 13)),
+          if (lastText != null) Padding(padding: const EdgeInsets.only(top: 4), child: Text('آخر رسالة: $lastText', style: const TextStyle(color: Ya.muted, fontSize: 12.5))),
+        ]),
+      ),
+    );
+  }
+}

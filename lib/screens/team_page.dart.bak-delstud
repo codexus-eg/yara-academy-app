@@ -1,0 +1,235 @@
+﻿import 'package:flutter/material.dart';
+import 'tour.dart';
+import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
+
+import '../core/api.dart';
+import '../core/sheet.dart';
+import '../core/theme.dart';
+import '../core/widgets.dart';
+
+/// Supervisor: manage teachers (create, suspend, new login code, delete).
+class TeamPage extends StatefulWidget {
+  const TeamPage({super.key});
+  @override
+  State<TeamPage> createState() => _TeamPageState();
+}
+
+class _TeamPageState extends State<TeamPage> {
+  List<Map<String, dynamic>> _t = [];
+  List<Map<String, dynamic>> _s = [];
+  bool _loading = true;
+
+  Api get _api => context.read<Api>();
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final r = await _api.get('/staff/teachers');
+      final s = await _api.get('/staff/students');
+      if (mounted) {
+        setState(() {
+          _t = ((r['items'] as List?) ?? []).cast<Map<String, dynamic>>();
+          _s = ((s['items'] as List?) ?? []).cast<Map<String, dynamic>>();
+          _loading = false;
+        });
+      }
+    } on ApiError catch (e) {
+      if (mounted) {
+        setState(() => _loading = false);
+        toast(context, e.message, error: true);
+      }
+    }
+  }
+
+  Future<void> _do(Future<void> Function() f) async {
+    try {
+      await f();
+    } on ApiError catch (e) {
+      if (mounted) toast(context, e.message, error: true);
+    }
+  }
+
+  Future<void> _codeSheet(String name, String code, {String hint = 'أعطيه للمعلم، بيدخل بيه من نفس خانة الدخول.'}) => showYaSheet<void>(
+        context,
+        (c) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Text('كود $name', style: Ya.display(size: 25)),
+          const SizedBox(height: 14),
+          Center(child: Text(code, textDirection: TextDirection.ltr, style: Ya.display(size: 42, color: Ya.teal).copyWith(letterSpacing: 6))),
+          const SizedBox(height: 8),
+          Text(hint, textAlign: TextAlign.center, style: const TextStyle(color: Ya.muted)),
+          const SizedBox(height: 14),
+          OutlinedButton(onPressed: () => Clipboard.setData(ClipboardData(text: code)), child: const Text('نسخ الكود')),
+          const SizedBox(height: 8),
+          GradButton(label: 'تمام', onPressed: () => Navigator.pop(c)),
+        ]),
+      );
+
+  Future<void> _create() async {
+    final name = TextEditingController(), spec = TextEditingController();
+    await showYaSheet<void>(
+      context,
+      (c) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Text('معلم جديدة', style: Ya.display(size: 25)),
+        Field('الاسم', child: TextField(controller: name)),
+        Field('التخصص (اختياري)', child: TextField(controller: spec)),
+        const SizedBox(height: 16),
+        GradButton(
+          label: 'إنشاء',
+          onPressed: () async {
+            if (name.text.trim().isEmpty) return;
+            Navigator.pop(c);
+            await _do(() async {
+              final r = await _api.post('/staff/teachers', body: {'fullName': name.text.trim(), if (spec.text.trim().isNotEmpty) 'specialty': spec.text.trim()});
+              await _load();
+              if (mounted) await _codeSheet((r['user'] as Map)['fullName'] as String, r['code'] as String);
+            });
+          },
+        ),
+      ]),
+    );
+  }
+
+  Future<void> _createStudent() async {
+    final name = TextEditingController();
+    await showYaSheet<void>(
+      context,
+      (c) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Text('طالب جديد', style: Ya.display(size: 25)),
+        Field('الاسم الرباعي', child: TextField(controller: name)),
+        const SizedBox(height: 16),
+        GradButton(
+          label: 'إنشاء',
+          onPressed: () async {
+            if (name.text.trim().isEmpty) return;
+            Navigator.pop(c);
+            await _do(() async {
+              final r = await _api.post('/staff/students', body: {'fullName': name.text.trim()});
+              await _load();
+              if (mounted) await _codeSheet((r['student'] as Map)['fullName'] as String, r['code'] as String, hint: 'أعطيه للطالب، بيدخل بيه من خانة الدخول.');
+            });
+          },
+        ),
+      ]),
+    );
+  }
+
+  Widget _studentCard(Map<String, dynamic> u) {
+    final active = u['isActive'] == true;
+    return YaCard(
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(children: [
+          Expanded(child: Text(u['fullName'] as String? ?? '', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16))),
+          if (!active) Pill.bad('موقوف'),
+        ]),
+        const SizedBox(height: 4),
+        Wrap(spacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [
+          const Text('الكود:', style: TextStyle(color: Ya.muted, fontSize: 13)),
+          Text('${u['code'] ?? ''}', textDirection: TextDirection.ltr, style: const TextStyle(fontWeight: FontWeight.w700)),
+          Text('· ${u['subscriptionsCount'] ?? 0} اشتراك', style: const TextStyle(color: Ya.muted, fontSize: 13)),
+        ]),
+        const SizedBox(height: 8),
+        Row(children: [
+          Expanded(child: OutlinedButton(onPressed: () => _do(() async { await _api.patch('/staff/students/${u['id']}', body: {'isActive': !active}); await _load(); }), child: Text(active ? 'إيقاف' : 'تفعيل'))),
+          const SizedBox(width: 8),
+          Expanded(child: OutlinedButton(
+            onPressed: () async {
+              if (!await askConfirm(context, 'إنشاء كود جديد؟', body: 'الكود القديم هيتعطل.')) return;
+              await _do(() async {
+                final r = await _api.patch('/staff/students/${u['id']}', body: {'regenerateCode': true});
+                await _load();
+                if (mounted) await _codeSheet((r['student'] as Map)['fullName'] as String, r['code'] as String, hint: 'أعطيه للطالب، بيدخل بيه من خانة الدخول.');
+              });
+            },
+            child: const Text('كود جديد'),
+          )),
+        ]),
+      ]),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return YaPage(
+      title: 'الفريق',
+      child: _loading
+          ? const Center(child: CircularProgressIndicator(color: Ya.teal))
+          : RefreshIndicator(
+              onRefresh: _load,
+              child: ListView(padding: const EdgeInsets.all(16), children: [
+                Tour.wrap('teambtn', GradButton(label: '＋ معلم جديدة', onPressed: _create)),
+                const SizedBox(height: 10),
+                const Text('كود المعلم يشتغل مرة على الموقع ومرة على التطبيق فقط، وبعدها تفضل داخلة على جهازه؛ ولو احتاج تدخل من جهاز ثاني اضغط "كود جديد". كود المشرفين ثابت وموجود في ملف الإعدادات.', style: TextStyle(color: Ya.muted, fontSize: 13, height: 1.7)),
+                const SizedBox(height: 14),
+                Text('المعلمين', style: Ya.display(size: 22)),
+                const SizedBox(height: 8),
+                if (_t.isEmpty) const EmptyState(title: 'مفيش معلمين', hint: 'أضف معلم جديدة وهتاخد كود دخول.'),
+                for (final u in _t) Padding(padding: const EdgeInsets.only(bottom: 12), child: Tour.wrap(identical(u, _t.first) ? 'team0' : null, _card(u))),
+                const SizedBox(height: 14),
+                Text('الطلاب', style: Ya.display(size: 22)),
+                const SizedBox(height: 8),
+                GradButton(label: '＋ طالب جديد', onPressed: _createStudent),
+                const SizedBox(height: 6),
+                const Text('اكتب الاسم الرباعي وهيطلع للطالب كود دخول من 6 أرقام. لو ضاع الكود اضغط "كود جديد".', style: TextStyle(color: Ya.muted, fontSize: 13, height: 1.7)),
+                const SizedBox(height: 10),
+                if (_s.isEmpty) const EmptyState(title: 'مفيش طلاب', hint: 'أضف طالب جديد وهيتاخد كود دخول.'),
+                for (final u in _s) Padding(padding: const EdgeInsets.only(bottom: 12), child: _studentCard(u)),
+              ]),
+            ),
+    );
+  }
+
+  Widget _card(Map<String, dynamic> u) {
+    final active = u['isActive'] == true;
+    final used = u['codeUsed'] == true;
+    return YaCard(
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(children: [
+          Expanded(child: Text(u['fullName'] as String? ?? '', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 17))),
+          if (!active) Pill.bad('موقوفة'),
+        ]),
+        const SizedBox(height: 6),
+        if (used)
+          Wrap(spacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: const [Text('الكود:', style: TextStyle(color: Ya.muted, fontSize: 13)), Pill('استُخدم على الموقع والتطبيق ✅', bg: Color(0xFFEDF1F3), fg: Ya.muted)])
+        else
+          Wrap(spacing: 8, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
+            const Text('الكود:', style: TextStyle(color: Ya.muted, fontSize: 13)),
+            Text('${u['username']}', textDirection: TextDirection.ltr, style: const TextStyle(fontWeight: FontWeight.w700)),
+            u['codeUsedWeb'] == true ? const Pill('🌐 استُخدم', bg: Color(0xFFEDF1F3), fg: Ya.muted) : Pill.ok('🌐 متاح'),
+            u['codeUsedApp'] == true ? const Pill('📱 استُخدم', bg: Color(0xFFEDF1F3), fg: Ya.muted) : Pill.ok('📱 متاح'),
+          ]),
+        Text('${u['coursesCount'] ?? 0} كورس', style: const TextStyle(color: Ya.muted, fontSize: 13)),
+        const SizedBox(height: 10),
+        Row(children: [
+          Expanded(child: OutlinedButton(onPressed: () => _do(() async { await _api.patch('/staff/${u['id']}', body: {'isActive': !active}); await _load(); }), child: Text(active ? 'إيقاف' : 'تفعيل'))),
+          const SizedBox(width: 8),
+          Expanded(child: OutlinedButton(
+            onPressed: () async {
+              if (!await askConfirm(context, 'إنشاء كود جديد؟', body: 'الكود القديم هيتعطل.')) return;
+              await _do(() async {
+                final r = await _api.patch('/staff/${u['id']}', body: {'regenerateCode': true});
+                await _load();
+                if (mounted) await _codeSheet((r['user'] as Map)['fullName'] as String, r['code'] as String);
+              });
+            },
+            child: const Text('كود جديد'),
+          )),
+          const SizedBox(width: 8),
+          Expanded(child: SoftButton(
+            label: 'حذف',
+            height: 46,
+            onPressed: () async {
+              if (!await askConfirm(context, 'حذف حساب المعلم؟', ok: 'حذف')) return;
+              await _do(() async { await _api.delete('/staff/teachers/${u['id']}'); await _load(); });
+            },
+          )),
+        ]),
+      ]),
+    );
+  }
+}
